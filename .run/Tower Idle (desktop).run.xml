@@ -1,0 +1,10 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Tower Idle (desktop)" type="Application" factoryName="Application">
+    <option name="MAIN_CLASS_NAME" value="com.towerdefence.client.desktop.DesktopLauncher" />
+    <option name="VM_PARAMETERS" value="--enable-native-access=ALL-UNNAMED" />
+    <module name="client-desktop" />
+    <method v="2">
+      <option name="Make" enabled="true" />
+    </method>
+  </configuration>
+</component>

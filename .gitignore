@@ -1,0 +1,16 @@
+target/
+.gradle/
+**/build/
+out/
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.DS_Store
+local.properties
+*.class
+*.log
+*.jar
+hs_err_pid*
+replay_pid*
