@@ -24,6 +24,9 @@ public record GameSnapshot(
         double crests,
         double stars,
         int pendingStars,
+        /** Wave you must pass on this tier before a cash-out pays anything. */
+        int prestigeFloor,
+        boolean canPrestige,
         double pendingShards,
         double towerHp,
         double towerMaxHp,

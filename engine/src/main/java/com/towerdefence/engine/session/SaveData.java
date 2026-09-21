@@ -15,6 +15,7 @@ public record SaveData(
         double sigils,
         double crests,
         double stars,
+        int lastRunWave,
         int coresAwarded,
         int sigilsAwarded,
         int prestiges,

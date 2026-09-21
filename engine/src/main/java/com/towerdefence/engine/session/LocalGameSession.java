@@ -78,6 +78,12 @@ public final class LocalGameSession implements GameSession {
     private boolean autoRun;
     private int autoRunTier = 1;
     private int nextRunStars;
+    /**
+     * Wave the previous run ended on. You only get to cash out by beating it, otherwise
+     * prestige is an infinite tap that pays for standing still. It follows the last run
+     * rather than an all-time record so a bad run lowers the bar instead of locking you out.
+     */
+    private int lastRunWave;
     private AutoPrestigeRule autoPrestige = AutoPrestigeRule.off();
     private PrestigeFormula compiledFormula;
     private String formulaError;
@@ -103,7 +109,11 @@ public final class LocalGameSession implements GameSession {
     private double spawnCooldown;
     private double waveBreak;
     private double secondsSinceWaveChange;
-    private final Random rng = new Random();
+    /**
+     * Fixed seed: the simulation has to be reproducible so balance probes can A/B a change,
+     * and so a future authoritative server can replay a client's run and get the same result.
+     */
+    private final Random rng = new Random(0x7D1DEL);
     private long hitCounter;
     private long lastNanos;
     private boolean clockStarted;
@@ -171,6 +181,12 @@ public final class LocalGameSession implements GameSession {
         long elapsed = nowNanos - lastNanos;
         lastNanos = nowNanos;
         catchUpElapsed(elapsed);
+    }
+
+    @Override
+    public void holdClock(long nowNanos) {
+        clockStarted = true;
+        lastNanos = nowNanos;
     }
 
     @Override
@@ -268,7 +284,9 @@ public final class LocalGameSession implements GameSession {
                 sigils,
                 crests,
                 stars,
-                phase == RunPhase.RUNNING ? balance.prestigeStars(wave) : 0,
+                canPrestige() ? balance.prestigeStars(wave, tier) : 0,
+                prestigeFloor(),
+                canPrestige(),
                 0d,
                 towerHp,
                 maxHp(),
@@ -390,11 +408,20 @@ public final class LocalGameSession implements GameSession {
     }
 
     private void prestige() {
-        if (phase != RunPhase.RUNNING) {
+        if (!canPrestige()) {
             return;
         }
         bankRun();
         resetRun();
+    }
+
+    /** A cash-out has to be earned: get further than the run before this one. */
+    private boolean canPrestige() {
+        return phase == RunPhase.RUNNING && wave > prestigeFloor();
+    }
+
+    private int prestigeFloor() {
+        return Math.max(balance.minPrestigeWave, lastRunWave);
     }
 
     private void selectTier(int target) {
@@ -406,12 +433,17 @@ public final class LocalGameSession implements GameSession {
         } else if (phase == RunPhase.DEAD) {
             runsCompleted += 1;
         }
+        // A new floor is a different difficulty, so the bar to beat starts over with it.
+        if (tier != target) {
+            lastRunWave = 0;
+        }
         tier = target;
         resetRun();
     }
 
     private void bankRun() {
-        nextRunStars = balance.prestigeStars(wave);
+        nextRunStars = wave > prestigeFloor() ? balance.prestigeStars(wave, tier) : 0;
+        lastRunWave = wave;
         prestiges += 1;
         runsCompleted += 1;
         evaluateMissions();
@@ -498,12 +530,13 @@ public final class LocalGameSession implements GameSession {
         moveProjectiles(dt);
         regenerate(dt);
         if (towerHp <= 0) {
-            if (autoPrestigeTriggers()) {
+            if (canPrestige() && autoPrestigeTriggers()) {
                 prestige();
                 return;
             }
             towerHp = 0;
             phase = RunPhase.DEAD;
+            lastRunWave = wave;
             stars = 0;
             nextRunStars = 0;
             for (UpgradeId id : UpgradeId.values()) {
@@ -515,7 +548,7 @@ public final class LocalGameSession implements GameSession {
             projectiles.clear();
             return;
         }
-        if (autoPrestigeTriggers()) {
+        if (canPrestige() && autoPrestigeTriggers()) {
             prestige();
         }
     }
@@ -1241,8 +1274,8 @@ public final class LocalGameSession implements GameSession {
             case RAMPART -> currentWallMax() <= 0 ? "no wall" : SciFormat.of(currentWallMax()) + " wall";
             case HARVEST -> String.format(Locale.ROOT, "+%.0f%% shards/kill",
                     level * balance.harvestPerLevel * 100);
-            case STAR_DAMAGE, STAR_HP, STAR_COIN, STAR_REGEN -> String.format(Locale.ROOT, "x%.2f",
-                    balance.starMultiplier(level));
+            case STAR_DAMAGE, STAR_HP, STAR_COIN, STAR_REGEN -> String.format(Locale.ROOT, "x%.2f > x%.2f",
+                    balance.starMultiplier(level), balance.starMultiplier(level + 1));
         };
     }
 
@@ -1365,6 +1398,7 @@ public final class LocalGameSession implements GameSession {
                 sigils,
                 crests,
                 stars,
+                lastRunWave,
                 coresAwarded,
                 sigilsAwarded,
                 prestiges,
@@ -1414,6 +1448,7 @@ public final class LocalGameSession implements GameSession {
         session.sigils = save.sigils();
         session.crests = save.crests();
         session.stars = save.stars();
+        session.lastRunWave = save.lastRunWave();
         session.coresAwarded = save.coresAwarded();
         session.sigilsAwarded = save.sigilsAwarded();
         session.prestiges = save.prestiges();

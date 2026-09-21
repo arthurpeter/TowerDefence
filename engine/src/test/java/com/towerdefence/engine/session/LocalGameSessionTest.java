@@ -203,6 +203,7 @@ class LocalGameSessionTest {
         GameBalance balance = GameBalance.standard().copy();
         balance.autoPrestigeCost = 0;
         balance.autoUnlockShards = 0;
+        balance.minPrestigeWave = 0;
         LocalGameSession session = new LocalGameSession(balance);
         session.apply(new GameCommand.StartRun());
         session.apply(new GameCommand.BuyUpgrade(UpgradeId.AUTO_PRESTIGE));
@@ -214,14 +215,17 @@ class LocalGameSessionTest {
 
         GameSnapshot snap = session.snapshot();
         assertTrue(snap.runsCompleted() >= 2, "only banked " + snap.runsCompleted() + " runs");
-        assertTrue(snap.wave() <= 4, "should keep resetting near the target, sat at wave " + snap.wave());
+        // The target is wave 4, but every bank has to beat the run before it, so it creeps up.
+        assertTrue(snap.wave() <= 15, "should keep resetting near the target, sat at wave " + snap.wave());
         assertTrue(snap.shards() > 0, "each banked run should pay shards");
     }
 
+    /** The stall rule bails you out of a stuck run, but standing still must not pay forever. */
     @Test
-    void autoPrestigeAlsoFiresWhenARunStalls() {
+    void autoPrestigeBanksAStalledRunOnceAndThenStopsPaying() {
         GameBalance balance = GameBalance.standard().copy();
         balance.autoPrestigeCost = 0;
+        balance.minPrestigeWave = 0;
         // Enemies that never move and never die: the run cannot progress on its own.
         balance.enemySpeedBase = 0;
         balance.enemySpeedPerWave = 0;
@@ -234,8 +238,9 @@ class LocalGameSessionTest {
 
         session.catchUpElapsed(TimeUnit.SECONDS.toNanos(45));
 
-        assertTrue(session.snapshot().runsCompleted() >= 3,
-                "a stalled run should bank and restart, got " + session.snapshot().runsCompleted());
+        assertEquals(1, session.snapshot().runsCompleted(),
+                "a run that never advances must bank once, not on a loop");
+        assertFalse(session.snapshot().canPrestige(), "no progress, no second cash-out");
     }
 
     @Test
@@ -259,6 +264,7 @@ class LocalGameSessionTest {
     @Test
     void killsPayShardsAndPrestigeDoesNot() {
         GameBalance balance = GameBalance.standard().copy();
+        balance.minPrestigeWave = 0;
         LocalGameSession session = new LocalGameSession(balance);
         session.apply(new GameCommand.StartRun());
         session.tick(0);
@@ -274,6 +280,7 @@ class LocalGameSessionTest {
     @Test
     void starBonusesResetWithTheRunAndDeathPaysNothing() {
         GameBalance balance = GameBalance.standard().copy();
+        balance.minPrestigeWave = 0;
         LocalGameSession session = new LocalGameSession(balance);
         session.apply(new GameCommand.StartRun());
         session.tick(0);
@@ -283,14 +290,18 @@ class LocalGameSessionTest {
         assertEquals(payout, session.snapshot().stars(), 0.001);
         session.apply(new GameCommand.BuyUpgrade(UpgradeId.STAR_DAMAGE));
         assertEquals(1, session.snapshot().prestige().getFirst().level());
-        assertEquals(0, session.snapshot().stars(), 0.001);
+        assertEquals(payout - balance.starCost(0), session.snapshot().stars(), 0.001);
 
+        // A second cash-out has to out-run the first, so play on before tapping it.
+        session.catchUpElapsed(TimeUnit.SECONDS.toNanos(60));
+        assertTrue(session.snapshot().canPrestige(), "the run should have passed the last one by now");
         session.apply(new GameCommand.Prestige());
         assertEquals(0, session.snapshot().prestige().getFirst().level(),
                 "x1.02 bonuses must die with the run");
         assertTrue(session.snapshot().stars() >= 1);
 
         GameBalance lethal = GameBalance.standard().copy();
+        lethal.minPrestigeWave = 0;
         lethal.baseDamage = 0;
         lethal.regenFractionPerSecond = 0;
         lethal.leakDamageBase = 1_000_000;
@@ -307,6 +318,169 @@ class LocalGameSessionTest {
         dying.apply(new GameCommand.StartRun());
         assertEquals(0, dying.snapshot().stars(), 0.001);
         assertEquals(0, dying.snapshot().prestige().getFirst().level());
+    }
+
+    /** Pausing used to just defer time: the whole pause replayed the moment you resumed. */
+    @Test
+    void aPausedGameNeitherRunsNorBanksTheTime() {
+        LocalGameSession session = new LocalGameSession();
+        session.apply(new GameCommand.StartRun());
+        session.tick(0);
+        session.tick(TimeUnit.SECONDS.toNanos(5));
+        int waveBefore = session.snapshot().wave();
+        double coinsBefore = session.snapshot().coins();
+
+        long paused = TimeUnit.MINUTES.toNanos(10);
+        session.holdClock(paused);
+        assertEquals(waveBefore, session.snapshot().wave(), "a held clock must not simulate");
+        assertEquals(coinsBefore, session.snapshot().coins(), 0.001);
+
+        session.tick(paused + TimeUnit.SECONDS.toNanos(1));
+        assertTrue(session.snapshot().wave() - waveBefore <= 2,
+                "resume replayed the pause and jumped to wave " + session.snapshot().wave());
+    }
+
+    /** Prestige used to be tappable on wave 1 for free points, forever. */
+    @Test
+    void prestigeIsLockedUntilTheRunBeatsTheOneBeforeIt() {
+        GameBalance balance = GameBalance.standard().copy();
+        balance.autoUnlockShards = 0;
+        LocalGameSession session = new LocalGameSession(balance);
+        session.apply(new GameCommand.StartRun());
+        session.apply(new GameCommand.BuyUpgrade(UpgradeId.AUTO));
+
+        GameSnapshot fresh = session.snapshot();
+        assertFalse(fresh.canPrestige(), "wave 1 must not be a cash-out");
+        assertEquals(0, fresh.pendingStars(), "and it must not advertise points either");
+        assertEquals(balance.minPrestigeWave, fresh.prestigeFloor());
+        session.apply(new GameCommand.Prestige());
+        assertEquals(1, session.snapshot().wave(), "the refused prestige must not restart the run");
+        assertEquals(0, session.snapshot().runsCompleted());
+
+        session.tick(0);
+        session.catchUpElapsed(TimeUnit.MINUTES.toNanos(3));
+        GameSnapshot deep = session.snapshot();
+        assertTrue(deep.wave() > balance.minPrestigeWave, "sat at wave " + deep.wave());
+        assertTrue(deep.canPrestige());
+        assertTrue(deep.pendingStars() > 0);
+
+        int banked = deep.wave();
+        session.apply(new GameCommand.Prestige());
+        GameSnapshot next = session.snapshot();
+        assertEquals(banked, next.prestigeFloor(), "the bar is now the run you just banked");
+        assertFalse(next.canPrestige(), "you cannot bank the same ground twice");
+    }
+
+    /** The old payout was wave/20 against a rising cost, so a cash-out bought one x1.02 tick. */
+    @Test
+    void prestigePaysEnoughStarsToBeWorthTapping() {
+        GameBalance balance = GameBalance.standard().copy();
+        assertTrue(balance.prestigeStars(100, 1) > balance.prestigeStars(20, 1), "deeper runs pay more");
+        assertTrue(balance.prestigeStars(100, 3) > balance.prestigeStars(100, 1), "deeper tiers pay more");
+
+        int levels = starLevelsAffordable(balance, balance.prestigeStars(100, 1));
+        assertTrue(levels >= 20, "a wave-100 cash-out only bought " + levels + " star levels");
+        assertTrue(balance.starMultiplier(levels) >= 1.4,
+                "focusing one stat after wave 100 is only x" + balance.starMultiplier(levels));
+
+        int deep = starLevelsAffordable(balance, balance.prestigeStars(600, 4));
+        assertTrue(balance.starMultiplier(deep) > balance.starMultiplier(levels) * 2,
+                "late prestiges must outscale early ones");
+    }
+
+    @Test
+    void starUpgradesMoveTheStatsTheyName() {
+        GameBalance balance = GameBalance.standard().copy();
+        // Flat, cheap levels so this test is about the effects, not about the payout size.
+        balance.starCostBase = 1;
+        balance.starCostGrowth = 0;
+        balance.minPrestigeWave = 0;
+        LocalGameSession session = new LocalGameSession(balance);
+        session.apply(new GameCommand.StartRun());
+        session.tick(0);
+        session.catchUpElapsed(TimeUnit.SECONDS.toNanos(30));
+        session.apply(new GameCommand.Prestige());
+        assertTrue(session.snapshot().stars() >= balance.starCost(0), "the cash-out funds the shop");
+
+        GameSnapshot before = session.snapshot();
+        session.apply(new GameCommand.BuyUpgrade(UpgradeId.STAR_DAMAGE));
+        assertTrue(session.snapshot().damage() > before.damage(), "star damage did nothing");
+
+        before = session.snapshot();
+        session.apply(new GameCommand.BuyUpgrade(UpgradeId.STAR_HP));
+        assertTrue(session.snapshot().towerMaxHp() > before.towerMaxHp(), "star hp did nothing");
+
+        before = session.snapshot();
+        session.apply(new GameCommand.BuyUpgrade(UpgradeId.STAR_REGEN));
+        assertTrue(session.snapshot().regenPerSecond() > before.regenPerSecond(), "star regen did nothing");
+    }
+
+    /** Stars only exist inside a run, so a fresh save must never show a buyable star card. */
+    @Test
+    void starShopIsDeadOutsideARun() {
+        LocalGameSession session = new LocalGameSession();
+        for (UpgradeView view : session.snapshot().prestige()) {
+            assertFalse(view.affordable(), view.id() + " should not be buyable before a run");
+        }
+        session.apply(new GameCommand.StartRun());
+        assertEquals(0, session.snapshot().stars(), 0.001, "run one starts with nothing to spend");
+    }
+
+    /**
+     * The whole point of the shop. Same seed, same play, the only difference is whether the
+     * levels a cash-out buys actually multiply anything — that has to show up as waves.
+     */
+    @Test
+    void spendingACashOutBuysRealWaves() {
+        int withStars = peakOfSecondRun(true);
+        int inert = peakOfSecondRun(false);
+        assertTrue(withStars > inert,
+                "stars changed nothing: wave " + withStars + " with them, " + inert + " without");
+    }
+
+    private static int peakOfSecondRun(boolean starsWork) {
+        GameBalance balance = GameBalance.standard().copy();
+        balance.autoUnlockShards = 0;
+        balance.autoPrestigeCost = 0;
+        if (!starsWork) {
+            // Stars are still paid and still spent; they just stop multiplying.
+            balance.starPerLevel = 0;
+        }
+        LocalGameSession session = new LocalGameSession(balance);
+        session.apply(new GameCommand.StartRun());
+        session.apply(new GameCommand.BuyUpgrade(UpgradeId.AUTO));
+        session.apply(new GameCommand.BuyUpgrade(UpgradeId.AUTO_PRESTIGE));
+        session.apply(new GameCommand.SetAutoPrestige(new AutoPrestigeRule(true, 0, 0, 25, "")));
+        session.tick(0);
+
+        advanceOneRun(session, null);
+        int[] peak = {0};
+        advanceOneRun(session, peak);
+        return peak[0];
+    }
+
+    private static void advanceOneRun(LocalGameSession session, int[] peak) {
+        int banked = session.snapshot().runsCompleted();
+        for (int step = 0; step < 400; step++) {
+            GameSnapshot snap = session.snapshot();
+            if (snap.phase() != RunPhase.RUNNING || snap.runsCompleted() != banked) {
+                return;
+            }
+            session.catchUpElapsed(TimeUnit.SECONDS.toNanos(10));
+            if (peak != null) {
+                peak[0] = Math.max(peak[0], session.snapshot().wave());
+            }
+        }
+    }
+
+    private static int starLevelsAffordable(GameBalance balance, int budget) {
+        int levels = 0;
+        double spent = 0;
+        while (spent + balance.starCost(levels) <= budget) {
+            spent += balance.starCost(levels);
+            levels += 1;
+        }
+        return levels;
     }
 
     @Test
@@ -344,6 +518,7 @@ class LocalGameSessionTest {
     void autoPrestigeCanCashOutOnLowHp() {
         GameBalance balance = GameBalance.standard().copy();
         balance.autoPrestigeCost = 0;
+        balance.minPrestigeWave = 0;
         balance.baseDamage = 0;
         balance.regenFractionPerSecond = 0;
         LocalGameSession session = new LocalGameSession(balance);
@@ -388,6 +563,7 @@ class LocalGameSessionTest {
     void missionsPayCrestsAndNeverComeFromWavesAlone() {
         GameBalance balance = GameBalance.standard().copy();
         balance.autoUnlockShards = 0;
+        balance.minPrestigeWave = 0;
         LocalGameSession session = new LocalGameSession(balance);
         session.apply(new GameCommand.StartRun());
         assertEquals(0, session.snapshot().crests(), "fresh save has no mission rewards");
@@ -872,6 +1048,7 @@ class LocalGameSessionTest {
         balance.autoPrestigeCost = 0;
         balance.formulaCost = 0;
         balance.autoUnlockShards = 0;
+        balance.minPrestigeWave = 0;
         LocalGameSession session = new LocalGameSession(balance);
         session.apply(new GameCommand.StartRun());
         session.apply(new GameCommand.BuyUpgrade(UpgradeId.AUTO_PRESTIGE));
@@ -886,7 +1063,7 @@ class LocalGameSessionTest {
 
         GameSnapshot snap = session.snapshot();
         assertTrue(snap.runsCompleted() >= 2, "only banked " + snap.runsCompleted() + " runs");
-        assertTrue(snap.wave() <= 4, "sat at wave " + snap.wave());
+        assertTrue(snap.wave() <= 15, "sat at wave " + snap.wave());
     }
 
     @Test

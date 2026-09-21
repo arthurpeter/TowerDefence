@@ -205,8 +205,19 @@ public final class GameBalance {
     public double offlineHoursBase = 0.5;
     public double offlineHoursMax = 12;
     public double offlineCostBase = 2;
+    /**
+     * Prestige stars. A cash-out pays stars in proportion to the wave it gave up, and the
+     * levels they buy die with the run, so the loop is "last run funds this run". Cost grows
+     * slowly on purpose: the payout has to convert into dozens of levels or x1.02 reads as zero.
+     */
     public double starPerLevel = 0.02;
-    public double starCostBase = 1;
+    public double starCostBase = 2;
+    public double starCostGrowth = 0.10;
+    public double starsPerWave = 1.5;
+    /** No cash-out before this wave, so a fresh run cannot tap prestige on wave 1. */
+    public int minPrestigeWave = 10;
+    /** Deeper tiers pay more stars for the same wave. */
+    public double starsTierBonus = 0.30;
     public double autoCastCost = 3;
     public double formulaCost = 6;
 
@@ -511,8 +522,14 @@ public final class GameBalance {
         return Math.pow(1.0 + starPerLevel, Math.max(0, level));
     }
 
-    public int prestigeStars(int wave) {
-        return Math.max(1, wave / 20);
+    public double starCost(int level) {
+        return starCostBase * (1.0 + starCostGrowth * Math.max(0, level));
+    }
+
+    public int prestigeStars(int wave, int tier) {
+        double raw = Math.max(1, wave) * starsPerWave
+                * (1.0 + starsTierBonus * Math.max(0, tier - 1));
+        return (int) Math.max(1, Math.round(raw));
     }
 
     public double shardsForKill(double enemyHp, int harvestLevel) {
@@ -645,7 +662,7 @@ public final class GameBalance {
             case RECOVERY -> recoveryCostBase * Math.pow(1.0 + recoveryCostGrowth, level);
             case RAMPART -> rampartCostBase * Math.pow(1.0 + rampartCostGrowth, level);
             case HARVEST -> harvestCostBase * Math.pow(1.0 + harvestCostGrowth, level);
-            case STAR_DAMAGE, STAR_HP, STAR_COIN, STAR_REGEN -> starCostBase + level;
+            case STAR_DAMAGE, STAR_HP, STAR_COIN, STAR_REGEN -> starCost(level);
         };
     }
 

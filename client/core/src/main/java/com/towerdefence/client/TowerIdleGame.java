@@ -41,7 +41,9 @@ public final class TowerIdleGame extends Game {
     private LocalGameSession session;
     private OfflineReport offline;
     private float saveTimer;
-    private boolean paused;
+    /** The player's own pause. It survives menu trips and only the PAUSE button clears it. */
+    private boolean userPaused;
+    private boolean menuOpen;
 
     @Override
     public void create() {
@@ -83,8 +85,11 @@ public final class TowerIdleGame extends Game {
     public void render() {
         float delta = Gdx.graphics.getDeltaTime();
         session.wallClock(System.currentTimeMillis());
-        if (!paused || snapshot().autoRun()) {
-            session.tick(System.nanoTime());
+        long now = System.nanoTime();
+        if (simulating()) {
+            session.tick(now);
+        } else {
+            session.holdClock(now);
         }
         backdrop.update(delta);
 
@@ -120,24 +125,30 @@ public final class TowerIdleGame extends Game {
     public void resetSave() {
         session = new LocalGameSession(balance);
         offline = null;
+        userPaused = false;
         persist();
     }
 
+    /** Auto-run keeps farming while you browse the menu, but an explicit pause outranks it. */
+    private boolean simulating() {
+        return !userPaused && (!menuOpen || snapshot().autoRun());
+    }
+
     public boolean paused() {
-        return paused;
+        return userPaused;
     }
 
     public void setPaused(boolean value) {
-        paused = value;
+        userPaused = value;
     }
 
     public void showMenu() {
-        paused = !snapshot().autoRun();
+        menuOpen = true;
         setScreen(new MenuScreen(this));
     }
 
     public void showGame() {
-        paused = false;
+        menuOpen = false;
         setScreen(new GameScreen(this));
     }
 

@@ -52,14 +52,27 @@ public final class GameScreen implements Screen {
     private static final float CARD_W = (W - Theme.PAD * 2f - Theme.GAP * 2f) / 3f;
     private static final float CARD_H = 80f;
 
-    private enum Deck { ATTACK, DEFENSE, STAR }
+    private static final float PANEL_X = 24f;
+    private static final float PANEL_W = W - 48f;
+    private static final float PANEL_Y = 150f;
+    private static final float PANEL_H = 550f;
+
+    private enum Deck { ATTACK, DEFENSE }
+
+    /** Rows in the prestige screen, one per star stat. */
+    private static final int STAR_ROWS = 4;
 
     private final TowerIdleGame game;
     private final Rectangle[] cards = new Rectangle[CARDS];
     private final Rectangle[] autoBadges = new Rectangle[CARDS];
-    private final Rectangle[] deckTabs = new Rectangle[3];
+    private final Rectangle[] deckTabs = new Rectangle[2];
     private final Rectangle autoBuyToggle = new Rectangle();
     private final Rectangle autoPrestToggle = new Rectangle();
+    private final Rectangle[] starRows = new Rectangle[STAR_ROWS];
+    private final float[] starPress = new float[STAR_ROWS];
+    private final Button cashOut = new Button("CASH OUT", Button.Style.PRIMARY);
+    private final Button closePrestige = new Button("CLOSE", Button.Style.GHOST);
+    private boolean prestigeOpen;
     private final Rectangle[] abilitySlots = new Rectangle[AbilityId.values().length];
     private final float[] abilityPress = new float[AbilityId.values().length];
     private final float[] cardPress = new float[CARDS];
@@ -76,6 +89,8 @@ public final class GameScreen implements Screen {
     private final List<Impact> impacts = new ArrayList<>();
 
     private Deck deck = Deck.ATTACK;
+    private String hint = "";
+    private float hintTimer;
     private float time;
     private float recoil;
     private float shake;
@@ -96,12 +111,17 @@ public final class GameScreen implements Screen {
             cards[i] = new Rectangle(x, y, CARD_W, CARD_H);
             autoBadges[i] = new Rectangle(x + CARD_W - 30f, y + CARD_H - 26f, 24f, 20f);
         }
-        float tabW = (W - Theme.PAD * 2f - Theme.GAP * 4f) / 5f;
+        float tabW = (W - Theme.PAD * 2f - Theme.GAP * 3f) / 4f;
         for (int i = 0; i < deckTabs.length; i++) {
             deckTabs[i] = new Rectangle(Theme.PAD + i * (tabW + Theme.GAP), 74f, tabW, 26f);
         }
-        autoBuyToggle.set(Theme.PAD + 3 * (tabW + Theme.GAP), 74f, tabW, 26f);
-        autoPrestToggle.set(Theme.PAD + 4 * (tabW + Theme.GAP), 74f, tabW, 26f);
+        autoBuyToggle.set(Theme.PAD + 2 * (tabW + Theme.GAP), 74f, tabW, 26f);
+        autoPrestToggle.set(Theme.PAD + 3 * (tabW + Theme.GAP), 74f, tabW, 26f);
+        for (int i = 0; i < STAR_ROWS; i++) {
+            starRows[i] = new Rectangle(PANEL_X + 16f, 520f - i * 70f, PANEL_W - 32f, 62f);
+        }
+        cashOut.bounds.set(PANEL_X + 16f, 230f, PANEL_W - 32f, 52f);
+        closePrestige.bounds.set(PANEL_X + 16f, 174f, PANEL_W - 32f, 40f);
         int slots = abilitySlots.length;
         float slotW = (W - Theme.PAD * 2f - Theme.GAP * (slots - 1)) / slots;
         for (int i = 0; i < slots; i++) {
@@ -137,12 +157,16 @@ public final class GameScreen implements Screen {
         return switch (deck) {
             case ATTACK -> snap.attack();
             case DEFENSE -> snap.defense();
-            case STAR -> snap.prestige();
         };
     }
 
     private void onTouch(float x, float y) {
         GameSnapshot snap = game.snapshot();
+
+        if (prestigeOpen) {
+            touchPrestige(x, y, snap);
+            return;
+        }
 
         if (snap.phase() == RunPhase.DEAD || snap.phase() == RunPhase.CLEARED) {
             if (collect.touch(x, y)) {
@@ -160,16 +184,26 @@ public final class GameScreen implements Screen {
             game.showMenu();
             return;
         }
-        if (pauseChip.touch(x, y) || game.paused()) {
+        // Only this chip moves the pause. Resuming on any stray tap made it impossible to
+        // stay paused while poking around the menu or the shops.
+        if (pauseChip.touch(x, y)) {
             game.setPaused(!game.paused());
             return;
         }
 
-        if (autoBuyToggle.contains(x, y) && snap.autoUnlocked()) {
-            game.command(new GameCommand.SetAutoBuy(!snap.autoBuy()));
+        if (autoBuyToggle.contains(x, y)) {
+            if (snap.autoUnlocked()) {
+                game.command(new GameCommand.SetAutoBuy(!snap.autoBuy()));
+            } else {
+                showHint("AUTO BUY is locked - buy it with sigils in MENU > AUTO");
+            }
             return;
         }
-        if (autoPrestToggle.contains(x, y) && snap.autoPrestigeUnlocked()) {
+        if (autoPrestToggle.contains(x, y)) {
+            if (!snap.autoPrestigeUnlocked()) {
+                showHint("AUTO PRESTIGE is locked - buy it with sigils in MENU > AUTO");
+                return;
+            }
             var rule = snap.autoPrestige();
             boolean on = !rule.enabled();
             double hp = on && rule.hpPercent() <= 0 ? 25 : rule.hpPercent();
@@ -225,10 +259,42 @@ public final class GameScreen implements Screen {
 
         if (action.touch(x, y)) {
             if (snap.phase() == RunPhase.RUNNING) {
-                game.command(new GameCommand.Prestige());
+                prestigeOpen = true;
             } else {
                 game.command(new GameCommand.StartRun());
             }
+        }
+    }
+
+    /** Dead controls are worse than missing ones, so a locked tap says what unlocks it. */
+    private void showHint(String message) {
+        hint = message;
+        hintTimer = 3.2f;
+    }
+
+    private void touchPrestige(float x, float y, GameSnapshot snap) {
+        if (closePrestige.touch(x, y)) {
+            prestigeOpen = false;
+            return;
+        }
+        if (cashOut.touch(x, y)) {
+            if (snap.canPrestige()) {
+                game.command(new GameCommand.Prestige());
+                prestigeOpen = false;
+            }
+            return;
+        }
+        List<UpgradeView> tree = snap.prestige();
+        for (int i = 0; i < starRows.length && i < tree.size(); i++) {
+            if (starRows[i].contains(x, y)) {
+                starPress[i] = 1f;
+                game.command(new GameCommand.BuyUpgrade(tree.get(i).id()));
+                return;
+            }
+        }
+        // A tap outside the sheet closes it, like every other mobile bottom sheet.
+        if (x < PANEL_X || x > PANEL_X + PANEL_W || y < PANEL_Y || y > PANEL_Y + PANEL_H) {
+            prestigeOpen = false;
         }
     }
 
@@ -258,7 +324,11 @@ public final class GameScreen implements Screen {
         if (game.paused() && snap.phase() == RunPhase.RUNNING) {
             drawPauseOverlay(batch, ui);
         }
+        if (prestigeOpen && snap.phase() == RunPhase.RUNNING) {
+            drawPrestigePanel(batch, ui, snap);
+        }
         if (snap.phase() == RunPhase.DEAD || snap.phase() == RunPhase.CLEARED) {
+            prestigeOpen = false;
             drawEndOverlay(batch, ui, snap);
         }
         batch.end();
@@ -270,13 +340,19 @@ public final class GameScreen implements Screen {
         recoil = Math.max(0f, recoil - delta * 6f);
         shake = Math.max(0f, shake - delta * 3.2f);
         banner = Math.max(0f, banner - delta);
+        hintTimer = Math.max(0f, hintTimer - delta);
         action.update(delta);
         menuChip.update(delta);
         pauseChip.update(delta);
         collect.update(delta);
         backToMenu.update(delta);
+        cashOut.update(delta);
+        closePrestige.update(delta);
         for (int i = 0; i < cardPress.length; i++) {
             cardPress[i] = Math.max(0f, cardPress[i] - delta * 4f);
+        }
+        for (int i = 0; i < starPress.length; i++) {
+            starPress[i] = Math.max(0f, starPress[i] - delta * 4f);
         }
         for (int i = 0; i < abilityPress.length; i++) {
             abilityPress[i] = Math.max(0f, abilityPress[i] - delta * 4f);
@@ -610,12 +686,18 @@ public final class GameScreen implements Screen {
         ui.rect(batch, 0, 0, W, DECK_TOP, Theme.BG_BOTTOM, 0.96f);
         ui.rect(batch, 0, DECK_TOP - 2f, W, 2f, Theme.STROKE, 0.8f);
 
-        drawDeckTab(batch, ui, deckTabs[0], "ATK", deck == Deck.ATTACK);
-        drawDeckTab(batch, ui, deckTabs[1], "DEF", deck == Deck.DEFENSE);
-        drawDeckTab(batch, ui, deckTabs[2], "★", deck == Deck.STAR);
+        drawDeckTab(batch, ui, deckTabs[0], "ATTACK", deck == Deck.ATTACK);
+        drawDeckTab(batch, ui, deckTabs[1], "DEFENCE", deck == Deck.DEFENSE);
         drawToggle(batch, ui, autoBuyToggle, "BUY", snap.autoUnlocked(), snap.autoBuy());
         drawToggle(batch, ui, autoPrestToggle, "PREST", snap.autoPrestigeUnlocked(),
                 snap.autoPrestige().enabled());
+        if (hintTimer > 0f) {
+            float alpha = Math.min(1f, hintTimer);
+            ui.panelOutlined(batch, Theme.PAD, DECK_TOP + 66f, W - Theme.PAD * 2f, 30f,
+                    Theme.SURFACE_HI, Theme.ELITE, 1.2f);
+            ui.textFit(batch, hint, W / 2f, DECK_TOP + 81f, W - Theme.PAD * 4f, Theme.TEXT_TINY,
+                    ui.fade(Theme.ELITE, alpha), Ui.CENTER);
+        }
 
         List<UpgradeView> views = deckViews(snap);
         for (int i = 0; i < cards.length && i < views.size(); i++) {
@@ -624,10 +706,88 @@ public final class GameScreen implements Screen {
 
         boolean running = snap.phase() == RunPhase.RUNNING;
         action.enabled = true;
-        action.label = running
-                ? "PRESTIGE  +" + snap.pendingStars() + " ★"
-                : "START RUN";
+        if (!running) {
+            action.label = "START RUN";
+        } else if (snap.stars() > 0) {
+            action.label = "PRESTIGE  -  " + SciFormat.of(snap.stars()) + " PTS TO SPEND";
+        } else if (snap.canPrestige()) {
+            action.label = "PRESTIGE  -  CASH OUT +" + snap.pendingStars();
+        } else {
+            action.label = "PRESTIGE  -  LOCKED TO WAVE " + (snap.prestigeFloor() + 1);
+        }
         action.draw(batch, ui, Theme.TEXT_BODY);
+    }
+
+    /** The in-run prestige sheet: the only place run points are earned and spent. */
+    private void drawPrestigePanel(SpriteBatch batch, Ui ui, GameSnapshot snap) {
+        ui.rect(batch, 0, 0, W, H, Theme.BG_TOP, 0.82f);
+        ui.panelOutlined(batch, PANEL_X, PANEL_Y, PANEL_W, PANEL_H, Theme.SURFACE, Theme.STAR, 1.5f);
+
+        float top = PANEL_Y + PANEL_H;
+        ui.textTracked(batch, "PRESTIGE", PANEL_X + PANEL_W / 2f, top - 38f, Theme.TEXT_H1, 3f, Theme.STAR);
+
+        CurrencyChip.icon(batch, ui, Currency.STAR, PANEL_X + PANEL_W / 2f - 52f, top - 76f, 8f);
+        ui.textFit(batch, SciFormat.of(snap.stars()) + " POINTS", PANEL_X + PANEL_W / 2f - 36f, top - 76f,
+                PANEL_W / 2f, Theme.TEXT_BODY,
+                snap.stars() > 0 ? Theme.STAR : Theme.TEXT_DIM, Ui.LEFT);
+        ui.textFit(batch, "earned by cashing out - spent here - gone when the run ends",
+                PANEL_X + PANEL_W / 2f, top - 104f, PANEL_W - 32f, Theme.TEXT_TINY,
+                ui.fade(Theme.TEXT_DIM, 0.95f), Ui.CENTER);
+
+        List<UpgradeView> tree = snap.prestige();
+        for (int i = 0; i < starRows.length && i < tree.size(); i++) {
+            drawStarRow(batch, ui, starRows[i], tree.get(i), starPress[i]);
+        }
+
+        boolean can = snap.canPrestige();
+        cashOut.enabled = can;
+        // The primary fill still reads as tappable when faded, so a locked cash-out goes ghost.
+        cashOut.style = can ? Button.Style.PRIMARY : Button.Style.GHOST;
+        cashOut.label = can
+                ? "CASH OUT NOW  +" + snap.pendingStars()
+                : "REACH WAVE " + (snap.prestigeFloor() + 1) + " TO CASH OUT";
+        cashOut.draw(batch, ui, Theme.TEXT_BODY);
+        ui.textFit(batch, can
+                        ? "restarts the run at wave 1 and pays the points above"
+                        : "your last run reached wave " + snap.prestigeFloor() + " - beat it first",
+                PANEL_X + PANEL_W / 2f, 300f, PANEL_W - 32f, Theme.TEXT_TINY,
+                ui.fade(can ? Theme.OK : Theme.TEXT_DIM, 0.9f), Ui.CENTER);
+        closePrestige.draw(batch, ui, Theme.TEXT_SMALL);
+    }
+
+    private void drawStarRow(SpriteBatch batch, Ui ui, Rectangle box, UpgradeView view, float press) {
+        float squash = press * 2f;
+        float x = box.x + squash;
+        float y = box.y + squash * 0.5f;
+        float w = box.width - squash * 2f;
+        float h = box.height - squash;
+        ui.panelOutlined(batch, x, y, w, h,
+                view.affordable() ? Theme.SURFACE_HI : Theme.SURFACE_LO,
+                view.affordable() ? Theme.STAR : Theme.STROKE, 1.2f);
+
+        float pillW = 76f;
+        ui.textFit(batch, starLabel(view.id()), x + Theme.PAD, y + h - 20f, w - pillW - 40f,
+                Theme.TEXT_BODY, view.affordable() ? Theme.TEXT : Theme.TEXT_DIM, Ui.LEFT);
+        ui.textFit(batch, view.effect(), x + Theme.PAD, y + 20f, w - pillW - 40f,
+                Theme.TEXT_SMALL, ui.fade(Theme.STAR, 0.9f), Ui.LEFT);
+        ui.textFit(batch, "L" + view.level(), x + w - pillW - 26f, y + h - 20f, 34f,
+                Theme.TEXT_TINY, Theme.TEXT_DIM, Ui.RIGHT);
+
+        float pillX = x + w - pillW - Theme.PAD;
+        ui.panel(batch, pillX, y + h / 2f - 13f, pillW, 26f, Theme.SURFACE_LO, 0.95f);
+        CurrencyChip.icon(batch, ui, Currency.STAR, pillX + 15f, y + h / 2f, 6f);
+        ui.textFit(batch, SciFormat.of(view.cost()), pillX + pillW - 9f, y + h / 2f, pillW - 32f,
+                Theme.TEXT_SMALL, view.affordable() ? Theme.STAR : Theme.TEXT_DIM, Ui.RIGHT);
+    }
+
+    private static String starLabel(UpgradeId id) {
+        return switch (id) {
+            case STAR_DAMAGE -> "DAMAGE";
+            case STAR_HP -> "TOWER HP";
+            case STAR_COIN -> "COIN GAIN";
+            case STAR_REGEN -> "REGEN";
+            default -> id.name();
+        };
     }
 
     private void drawDeckTab(SpriteBatch batch, Ui ui, Rectangle box, String label, boolean active) {
@@ -642,7 +802,7 @@ public final class GameScreen implements Screen {
         Color stroke = !unlocked ? Theme.STROKE : on ? Theme.OK : Theme.STROKE;
         ui.panelOutlined(batch, box.x, box.y, box.width, box.height,
                 on && unlocked ? Theme.SURFACE_HI : Theme.SURFACE_LO, stroke, 1.2f);
-        String text = unlocked ? (on ? label + " ON" : label) : label;
+        String text = unlocked ? (on ? label + " ON" : label) : label + " ?";
         ui.textFit(batch, text, box.x + box.width / 2f, box.y + box.height / 2f, box.width - 6f,
                 Theme.TEXT_TINY, unlocked ? (on ? Theme.OK : Theme.TEXT) : Theme.TEXT_DIM, Ui.CENTER);
     }
@@ -708,10 +868,6 @@ public final class GameScreen implements Screen {
             case FOUNDATION -> "BASE";
             case FORTUNE -> "FORTUNE";
             case AUTO -> "AUTO";
-            case STAR_DAMAGE -> "★ DMG";
-            case STAR_HP -> "★ HP";
-            case STAR_COIN -> "★ COIN";
-            case STAR_REGEN -> "★ REG";
             default -> id.name();
         };
     }
@@ -783,8 +939,8 @@ public final class GameScreen implements Screen {
         ui.rect(batch, 0, 0, W, H, Theme.BG_TOP, 0.55f);
         ui.panelOutlined(batch, 70f, 390f, W - 140f, 90f, Theme.SURFACE, Theme.ACCENT, 1.5f);
         ui.textTracked(batch, "PAUSED", W / 2f, 448f, Theme.TEXT_H1, 3f, Theme.ACCENT);
-        ui.textFit(batch, "tap to resume  -  menu still works",
-                W / 2f, 418f, W - 180f, Theme.TEXT_TINY, Theme.TEXT_DIM, Ui.CENTER);
+        ui.textFit(batch, "press PLAY to resume  -  shops and menu still work",
+                W / 2f, 418f, W - 160f, Theme.TEXT_TINY, Theme.TEXT_DIM, Ui.CENTER);
     }
 
     private void drawEndOverlay(SpriteBatch batch, Ui ui, GameSnapshot snap) {

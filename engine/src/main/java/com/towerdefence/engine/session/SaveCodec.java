@@ -8,7 +8,7 @@ import java.util.List;
 import java.util.Locale;
 
 public final class SaveCodec {
-    private static final String HEADER = "TD11";
+    private static final String HEADER = "TD12";
 
     private SaveCodec() {}
 
@@ -24,6 +24,7 @@ public final class SaveCodec {
         appendDouble(out, save.sigils());
         appendDouble(out, save.crests());
         appendDouble(out, save.stars());
+        out.append(save.lastRunWave()).append('\n');
         out.append(save.coresAwarded()).append('\n');
         out.append(save.sigilsAwarded()).append('\n');
         out.append(save.prestiges()).append('\n');
@@ -90,6 +91,7 @@ public final class SaveCodec {
         double sigils = Double.parseDouble(lines[i++]);
         double crests = Double.parseDouble(lines[i++]);
         double stars = Double.parseDouble(lines[i++]);
+        int lastRunWave = Integer.parseInt(lines[i++]);
         int coresAwarded = Integer.parseInt(lines[i++]);
         int sigilsAwarded = Integer.parseInt(lines[i++]);
         int prestiges = Integer.parseInt(lines[i++]);
@@ -156,6 +158,7 @@ public final class SaveCodec {
                 sigils,
                 crests,
                 stars,
+                lastRunWave,
                 coresAwarded,
                 sigilsAwarded,
                 prestiges,

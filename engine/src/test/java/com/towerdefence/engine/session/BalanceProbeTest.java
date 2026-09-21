@@ -90,9 +90,11 @@ class BalanceProbeTest {
                 spendMeta(session);
             }
             lastBest = Math.max(lastBest, peak);
+            int paid = balance.prestigeStars(peak, startTier);
             rows.add(String.format(Locale.ROOT,
-                    "run %2d  T%d peak %4d  end %-7s  open %d  shards %s  cores %s  best %d",
+                    "run %2d  T%d peak %4d  end %-7s  open %d  stars %5d -> x%.2f  shards %s  cores %s  best %d",
                     run, startTier, peak, end, snap.highestTierUnlocked(),
+                    paid, balance.starMultiplier(starLevels(balance, paid)),
                     compact(snap.shards()), compact(snap.cores()), snap.bestWave()));
         }
 
@@ -108,6 +110,17 @@ class BalanceProbeTest {
         assertTrue(finalSnap.bestWave() < 400,
                 "twelve smart runs already sit at wave " + finalSnap.bestWave() + " — too fast");
         assertTrue(balance.unlockWaveOn(20) == balance.unlockCap, "unlock must stop growing");
+    }
+
+    /** Levels a focused player buys if the whole cash-out goes into one star stat. */
+    private static int starLevels(GameBalance balance, int budget) {
+        int levels = 0;
+        double spent = 0;
+        while (spent + balance.starCost(levels) <= budget) {
+            spent += balance.starCost(levels);
+            levels += 1;
+        }
+        return levels;
     }
 
     /** A real player dumps leftover shards into the meta tree instead of hoarding them. */
